@@ -5,6 +5,7 @@ import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 import torch.nn as nn
+from numpy.ma.core import negative
 from sympy.physics.quantum.gate import normalized
 from torchvision.datasets.voc import VOCDetection
 from torch.utils.data import Dataset
@@ -21,7 +22,7 @@ class Yolov1_VOC_Dataset(Dataset):
         # 调用 torchvision 中专门为 voc 数据集准备的dataset
 
         self.dataset=VOCDetection(
-            root="data",
+            root="VOCdevkit/VOC2012",
             year="2012",
             image_set=('train' if set_type=='train'else'test'),  # 判断是train还是test  相当与选择是训练集还是测试集
             download=False,              # 选择是否下载 数据集  (如果本地已经下载好了无需重复下载
@@ -67,7 +68,7 @@ class Yolov1_VOC_Dataset(Dataset):
         # 如果进行数据增强的话
         if self.augment :
             # 应用平移和缩放   affine 函数的详细参数作用可以查阅资料
-            data=TF.affine(data,angle=0.0,translate=(x_shift,y_shift),scale=scale,shear=0.0)
+            data=TF.affine(data,angle=0.0,translate=[x_shift,y_shift],scale=scale,shear=[0.0])
             # 随机调整色调
             dara=TF.adjust_hue(data,hue_factor=0.2*random.random()-0.1)
             # 随机调整饱和度
@@ -118,6 +119,54 @@ class Yolov1_VOC_Dataset(Dataset):
                 cell =(col,row)
                 if cell not in class_names or name==class_names[cell]:
 
+                    # 设置独热向量
+                    one_hot=torch.zeros(config.C)
+                    one_hot[class_index]=1.0
+
+                    #将独热向量填充到 GT 中去 （值得注意的是  GT向量 和 特征向量不太一样  GT是前20通道为类别 用独热向量填充）
+                    ground_truth[col,row,:config.C]=one_hot
+                    class_names[cell]=name
+
+                    #接着填充 GT的 (x,y,w,h,置信度) 五个值
+                    bbox_index=boxes.get(cell,0)   # 当前是第几个框
+                    if bbox_index <config.B:
+                        bbox_truth=(
+
+                            (mid_x-col*grid_size_x)/config.image_size[0],    # 计算中心坐标在当前grid cell  x方向的偏移量  除以图片的宽实现归一化
+                            (mid_y-row*grid_size_y)/config.image_size[1],    # 同上
+                            (x_max-x_min)/config.image_size[0],              # GT宽归一化到grid cell 中去
+                            (y_max-y_min)/config.image_size[1],              # 同上
+                            1.0                                              # 置信度
+                        )
+
+                    # 因为GT的形状和特征形状相同  预测时有B个框  但是GT只有一个正确值 所以我们重复填充GT(x,y,w,h,confidence,c) B次
+                    bbox_start=5*bbox_index+config.C
+                    ground_truth[row,col,bbox_start:]=torch.tensor(bbox_truth).repeat(config.B-bbox_index)
+                    boxes[cell]=bbox_index+1
+
+
+        return data,ground_truth,original_data        # 返回处理后的图片  填充完毕的GT特征  未经处理的图片
+
+
+
+    def __len__(self):
+        return len(self.dataset)
+
+
+
+if __name__ == '__main__':
+    #可视化数据集
+    obj_classes=utils.load_class_array()
+    train_set=Yolov1_VOC_Dataset('train',normalize=True,augment=True)
+
+    negative_labels=0
+    smallest=0
+    largest=0
+    for data,label,_ in train_set :
+        negative_labels+=torch.sum(label<0).item()
+        smallest=min(smallest,torch.min(data).item())
+        largest=max(largest,torch.max(data).item())
+        utils.plot_boxes(data,label,obj_classes,max_overlap=float('inf'))
 
 
 
